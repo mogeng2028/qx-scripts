@@ -1,146 +1,113 @@
 /**
 
-- AI 服务解锁检测脚本
-- 适用于 QuantumultX
+- AI 服务解锁检测
+- 适用于 QuantumultX [task_local] event-interaction
+- 检测：ChatGPT / Gemini / Claude / Grok
 - 
-- 检测服务：ChatGPT / Claude / Gemini / Perplexity / Grok / Copilot
-- 
-- 使用方式：
-- 定时任务 cron: 0 9 * * * ai_check.js, tag=AI解锁检测, enabled=true
-- 或手动 [rewrite_local] 触发
+- 配置写法：
+- event-interaction https://raw.githubusercontent.com/mogeng2028/qx-scripts/main/ai_check.js, tag=AI解锁检测, img-url=https://raw.githubusercontent.com/Koolson/Qure/master/IconSet/Color/Global.png, enabled=true
   */
 
-const SERVICES = [
-{
-name: “ChatGPT”,
-url: “https://chat.openai.com/cdn-cgi/trace”,
-check: (status, body) => {
-if (status !== 200) return { ok: false, reason: `HTTP ${status}` };
-// loc=XX 表示当前出口国家
-const loc = (body.match(/loc=(\w+)/) || [])[1];
-const blocked = [“CN”, “KP”, “CU”, “IR”, “RU”, “BY”, “UA”].includes(loc);
-return blocked
-? { ok: false, reason: `地区受限 (${loc})` }
-: { ok: true, reason: loc || “未知地区” };
-},
-},
-{
-name: “Claude”,
-url: “https://claude.ai/api/auth/session”,
-check: (status, body) => {
-// 403 = 地区封锁, 200/401 = 可访问
-if (status === 403) return { ok: false, reason: “地区封锁 (403)” };
-if (status === 200 || status === 401) return { ok: true, reason: `HTTP ${status}` };
-return { ok: false, reason: `HTTP ${status}` };
-},
-},
-{
-name: “Gemini”,
-url: “https://gemini.google.com/”,
-check: (status, body) => {
-if (status === 200) {
-// 页面内包含 “not available” 说明地区受限
-const blocked = /not available in your (country|region)/i.test(body);
-return blocked
-? { ok: false, reason: “地区受限” }
-: { ok: true, reason: “可访问” };
-}
-return { ok: false, reason: `HTTP ${status}` };
-},
-},
-{
-name: “Perplexity”,
-url: “https://www.perplexity.ai/”,
-check: (status, body) => {
-if (status === 200) return { ok: true, reason: “可访问” };
-if (status === 403) return { ok: false, reason: “地区封锁 (403)” };
-return { ok: false, reason: `HTTP ${status}` };
-},
-},
-{
-name: “Grok (xAI)”,
-url: “https://grok.com/”,
-check: (status, body) => {
-if (status === 200) return { ok: true, reason: “可访问” };
-if (status === 403) return { ok: false, reason: “地区封锁 (403)” };
-return { ok: false, reason: `HTTP ${status}` };
-},
-},
-{
-name: “Copilot”,
-url: “https://copilot.microsoft.com/”,
-check: (status, body) => {
-if (status === 200) {
-const blocked = /not available in your (country|region)/i.test(body);
-return blocked
-? { ok: false, reason: “地区受限” }
-: { ok: true, reason: “可访问” };
-}
-return { ok: false, reason: `HTTP ${status}` };
-},
-},
+// 支持 ChatGPT 的地区代码
+const GPT_REGIONS = [
+“AL”,“DZ”,“AD”,“AO”,“AG”,“AR”,“AM”,“AU”,“AT”,“AZ”,“BS”,“BD”,“BB”,“BE”,“BZ”,
+“BJ”,“BT”,“BA”,“BW”,“BR”,“BN”,“BG”,“BF”,“CV”,“CA”,“CL”,“CO”,“KM”,“CG”,“CR”,
+“HR”,“CY”,“CZ”,“DK”,“DJ”,“DM”,“DO”,“EC”,“EG”,“SV”,“GQ”,“EE”,“SZ”,“ET”,“FJ”,
+“FI”,“FR”,“GA”,“GM”,“GE”,“DE”,“GH”,“GR”,“GD”,“GT”,“GN”,“GW”,“GY”,“HT”,“HN”,
+“HU”,“IS”,“IN”,“ID”,“IQ”,“IE”,“IL”,“IT”,“JM”,“JP”,“JO”,“KZ”,“KE”,“KI”,“KW”,
+“KG”,“LV”,“LB”,“LS”,“LR”,“LI”,“LT”,“LU”,“MG”,“MW”,“MY”,“MV”,“ML”,“MT”,“MH”,
+“MR”,“MU”,“MX”,“MC”,“MN”,“ME”,“MA”,“MZ”,“NA”,“NR”,“NP”,“NL”,“NZ”,“NI”,“NE”,
+“NG”,“MK”,“NO”,“OM”,“PK”,“PW”,“PS”,“PA”,“PG”,“PY”,“PE”,“PH”,“PL”,“PT”,“QA”,
+“RO”,“RW”,“KN”,“LC”,“VC”,“WS”,“SM”,“ST”,“SN”,“RS”,“SC”,“SL”,“SG”,“SK”,“SI”,
+“SB”,“ZA”,“ES”,“LK”,“SR”,“SE”,“CH”,“TH”,“TG”,“TO”,“TT”,“TN”,“TR”,“TV”,“UG”,
+“AE”,“US”,“UY”,“VU”,“ZM”,“BO”,“BN”,“CZ”,“VA”,“FM”,“MD”,“PS”,“KR”,“TW”,
+“TZ”,“TL”,“GB”
 ];
 
-// ─── 主逻辑 ───────────────────────────────────────────────────────────────────
+const results = {};
+let pending = 4;
 
-const results = [];
-let pending = SERVICES.length;
+function checkDone() {
+pending–;
+if (pending > 0) return;
 
-function finish() {
-const ok = results.filter((r) => r.ok);
-const fail = results.filter((r) => !r.ok);
+const ok = “✅”;
+const fail = “❌”;
+const lines = [
+`${results.chatgpt?.ok ? ok : fail} ChatGPT  ${results.chatgpt?.info || ""}`,
+`${results.gemini?.ok  ? ok : fail} Gemini   ${results.gemini?.info  || ""}`,
+`${results.claude?.ok  ? ok : fail} Claude   ${results.claude?.info  || ""}`,
+`${results.grok?.ok    ? ok : fail} Grok     ${results.grok?.info    || ""}`,
+];
 
-// 通知标题
-const title = `🤖 AI 解锁检测 (${ok.length}/${SERVICES.length})`;
-
-// 通知正文
-const lines = results.map((r) => {
-const icon = r.ok ? “✅” : “❌”;
-return `${icon} ${r.name}  ${r.reason}`;
-});
+const okCount = Object.values(results).filter(r => r.ok).length;
+const title   = `🤖 AI 解锁检测 (${okCount}/4)`;
+const subtitle = okCount === 4
+? “全部解锁 🎉”
+: Object.entries(results).filter(([, v]) => !v.ok).map(([k]) => k).join(” / “) + “ 受限”;
 const body = lines.join(”\n”);
 
-// 副标题（概览）
-const subtitle =
-ok.length === SERVICES.length
-? “全部解锁 🎉”
-: fail.map((r) => r.name).join(” / “) + “ 受限”;
-
-console.log(`[AI Check] ${title}\n${body}`);
 $notify(title, subtitle, body);
-$done();
+$done({ title, subtitle, content: body });
 }
 
-function fetchService(svc) {
-$task
-.fetch({
-url: svc.url,
+// ── ChatGPT ──────────────────────────────────────────────
+$task.fetch({
+url: “https://chat.openai.com/cdn-cgi/trace”,
 method: “GET”,
-headers: {
-“User-Agent”:
-“Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36”,
-Accept: “text/html,application/json,*/*”,
-},
+headers: { “User-Agent”: “Mozilla/5.0” },
 timeout: 10,
-})
-.then((resp) => {
-const status = resp.statusCode;
-const body = resp.body || “”;
-const result = svc.check(status, body);
-results.push({ name: svc.name, …result });
-})
-.catch((err) => {
-results.push({
-name: svc.name,
-ok: false,
-reason: “连接失败”,
-});
-})
-.finally(() => {
-pending -= 1;
-if (pending === 0) finish();
-});
-}
+}).then(resp => {
+const loc = (resp.body.match(/loc=(\w+)/) || [])[1] || “”;
+const supported = GPT_REGIONS.includes(loc.toUpperCase());
+results.chatgpt = supported
+? { ok: true,  info: `支持 🌏${loc}` }
+: { ok: false, info: `不支持 🚫${loc || "未知"}` };
+}).catch(() => {
+results.chatgpt = { ok: false, info: “连接失败” };
+}).finally(checkDone);
 
-// 并发请求所有服务
-SERVICES.forEach(fetchService);
+// ── Gemini ───────────────────────────────────────────────
+$task.fetch({
+url: “https://gemini.google.com/”,
+method: “GET”,
+headers: { “User-Agent”: “Mozilla/5.0” },
+timeout: 10,
+}).then(resp => {
+const blocked = /not available in your (country|region)/i.test(resp.body || “”);
+results.gemini = (resp.statusCode === 200 && !blocked)
+? { ok: true,  info: “支持 ✓” }
+: { ok: false, info: “不支持 🚫” };
+}).catch(() => {
+results.gemini = { ok: false, info: “连接失败” };
+}).finally(checkDone);
+
+// ── Claude ───────────────────────────────────────────────
+$task.fetch({
+url: “https://claude.ai/api/auth/session”,
+method: “GET”,
+headers: { “User-Agent”: “Mozilla/5.0” },
+timeout: 10,
+}).then(resp => {
+const s = resp.statusCode;
+results.claude = (s === 200 || s === 401)
+? { ok: true,  info: “支持 ✓” }
+: { ok: false, info: `不支持 🚫(${s})` };
+}).catch(() => {
+results.claude = { ok: false, info: “连接失败” };
+}).finally(checkDone);
+
+// ── Grok ─────────────────────────────────────────────────
+$task.fetch({
+url: “https://grok.com/”,
+method: “GET”,
+headers: { “User-Agent”: “Mozilla/5.0” },
+timeout: 10,
+}).then(resp => {
+const s = resp.statusCode;
+results.grok = s === 200
+? { ok: true,  info: “支持 ✓” }
+: { ok: false, info: `不支持 🚫(${s})` };
+}).catch(() => {
+results.grok = { ok: false, info: “连接失败” };
+}).finally(checkDone);
